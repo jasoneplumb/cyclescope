@@ -19,6 +19,8 @@ TEST_CASE("warn and todo macros expand and continue") {
 TEST_CASE("format handles edge inputs") {
   CHECK(cyclescope::detail::format_line("f", 0, "todo", "") ==
         "f(0): todo: ");
+  CHECK(cyclescope::detail::format_line(nullptr, 1, nullptr, nullptr) ==
+        "(null)(1): (null): (null)");
   const std::string long_message(300, 'x');
   const std::string line = cyclescope::detail::format_line(
       "a/b/c.hpp", 9001, "error", long_message.c_str());

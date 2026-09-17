@@ -41,8 +41,10 @@ inline void emit(const char* file, int line, const char* level,
 
 }  // namespace cyclescope::detail
 
+// Disabling the error level silences the message, never the abort: a state
+// declared fatal stays fatal in every configuration.
 #if defined(CYCLESCOPE_LOG_DISABLE) || defined(CYCLESCOPE_LOG_DISABLE_ERROR)
-#define CS_ERROR(message) ((void)0)
+#define CS_ERROR(message) std::abort()
 #else
 #define CS_ERROR(message)                                               \
   do {                                                                  \
