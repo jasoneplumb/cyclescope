@@ -23,11 +23,11 @@ if(NOT MSVC)
   target_compile_features(cyclescope_instrument PUBLIC cxx_std_20)
   target_compile_options(cyclescope_instrument PRIVATE -Wall -Wextra)
   # The hooks and frame stacks must be visible to the sanitizer too.
+  # Consumers opt in to the sanitizer runtime themselves (tests and
+  # examples do), keeping instrumentation consistent per binary.
   if(CYCLESCOPE_SANITIZE AND NOT MSVC)
     target_compile_options(cyclescope_instrument PRIVATE
       -fsanitize=${CYCLESCOPE_SANITIZE} -g -fno-omit-frame-pointer)
-    target_link_options(cyclescope_instrument PUBLIC
-      -fsanitize=${CYCLESCOPE_SANITIZE})
   endif()
 endif()
 

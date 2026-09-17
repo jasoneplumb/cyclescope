@@ -43,20 +43,27 @@ inline thread_local bool tls_suppress = false;
 // recursing without bound in unoptimized builds.
 #if defined(_MSC_VER)
 #define CYCLESCOPE_ALWAYS_INLINE __forceinline
+#define CYCLESCOPE_NO_INSTRUMENT
 #else
 #define CYCLESCOPE_ALWAYS_INLINE __attribute__((always_inline)) inline
+#define CYCLESCOPE_NO_INSTRUMENT __attribute__((no_instrument_function))
 #endif
 
 struct suppress_scope {
   bool previous;
-  CYCLESCOPE_ALWAYS_INLINE suppress_scope() noexcept
+  CYCLESCOPE_ALWAYS_INLINE CYCLESCOPE_NO_INSTRUMENT suppress_scope() noexcept
       : previous(tls_suppress) {
     tls_suppress = true;
   }
   suppress_scope(const suppress_scope&) = delete;
   suppress_scope& operator=(const suppress_scope&) = delete;
-  CYCLESCOPE_ALWAYS_INLINE ~suppress_scope() { tls_suppress = previous; }
+  CYCLESCOPE_ALWAYS_INLINE CYCLESCOPE_NO_INSTRUMENT ~suppress_scope() {
+    tls_suppress = previous;
+  }
 };
+
+#undef CYCLESCOPE_ALWAYS_INLINE
+#undef CYCLESCOPE_NO_INSTRUMENT
 }  // namespace detail
 
 struct trace_event {
