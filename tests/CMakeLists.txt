@@ -29,3 +29,4 @@ function(cyclescope_add_test name)
 endfunction()
 
 cyclescope_add_test(log_test)
+cyclescope_add_test(trace_test)
