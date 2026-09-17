@@ -11,6 +11,8 @@ target_include_directories(cyclescope INTERFACE
 )
 target_compile_features(cyclescope INTERFACE cxx_std_20)
 
+set(CYCLESCOPE_SANITIZE "" CACHE STRING "Sanitizer for tests: thread, address, undefined, or empty")
+
 # Compiler-instrumentation backend: hooks for -finstrument-functions,
 # compiled without instrumentation. Not available with MSVC.
 if(NOT MSVC)
@@ -20,13 +22,19 @@ if(NOT MSVC)
     PUBLIC cyclescope::cyclescope ${CMAKE_DL_LIBS})
   target_compile_features(cyclescope_instrument PUBLIC cxx_std_20)
   target_compile_options(cyclescope_instrument PRIVATE -Wall -Wextra)
+  # The hooks and frame stacks must be visible to the sanitizer too.
+  if(CYCLESCOPE_SANITIZE AND NOT MSVC)
+    target_compile_options(cyclescope_instrument PRIVATE
+      -fsanitize=${CYCLESCOPE_SANITIZE} -g -fno-omit-frame-pointer)
+    target_link_options(cyclescope_instrument PUBLIC
+      -fsanitize=${CYCLESCOPE_SANITIZE})
+  endif()
 endif()
 
 if(PROJECT_IS_TOP_LEVEL)
   include(CTest)
   option(CYCLESCOPE_BUILD_TESTS "Build cyclescope tests" ON)
   option(CYCLESCOPE_BUILD_EXAMPLES "Build cyclescope examples" ON)
-  set(CYCLESCOPE_SANITIZE "" CACHE STRING "Sanitizer for tests: thread, address, undefined, or empty")
   if(CYCLESCOPE_BUILD_TESTS AND BUILD_TESTING)
     add_subdirectory(tests)
   endif()

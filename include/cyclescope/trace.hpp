@@ -37,12 +37,25 @@ inline thread_local bool tls_shutdown = false;
 // write_json() can never re-enter a lock this thread already holds.
 inline thread_local bool tls_suppress = false;
 
+// The constructor and destructor are forced inline: an out-of-line copy
+// emitted by an instrumented translation unit could be selected by the
+// linker, and its own entry would fire a hook before the flag is set,
+// recursing without bound in unoptimized builds.
+#if defined(_MSC_VER)
+#define CYCLESCOPE_ALWAYS_INLINE __forceinline
+#else
+#define CYCLESCOPE_ALWAYS_INLINE __attribute__((always_inline)) inline
+#endif
+
 struct suppress_scope {
   bool previous;
-  suppress_scope() noexcept : previous(tls_suppress) { tls_suppress = true; }
+  CYCLESCOPE_ALWAYS_INLINE suppress_scope() noexcept
+      : previous(tls_suppress) {
+    tls_suppress = true;
+  }
   suppress_scope(const suppress_scope&) = delete;
   suppress_scope& operator=(const suppress_scope&) = delete;
-  ~suppress_scope() { tls_suppress = previous; }
+  CYCLESCOPE_ALWAYS_INLINE ~suppress_scope() { tls_suppress = previous; }
 };
 }  // namespace detail
 
