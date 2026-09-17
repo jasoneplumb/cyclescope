@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -72,41 +73,63 @@ class collector {
   // Writes every buffer as chrome trace-event JSON. Returns false when the
   // file cannot be opened or written. `dropped_total`, when non-null,
   // receives the number of events lost to capacity limits.
+  //
+  // No lock is held across file I/O: the registry and each buffer are
+  // snapshotted first (a transient copy of the event data), so recording
+  // threads and thread registration never stall behind a slow disk.
   bool write_json(const char* path, std::uint64_t* dropped_total = nullptr) {
+    std::vector<std::shared_ptr<thread_buffer>> registered;
+    {
+      std::lock_guard registry_guard(registry_mutex_);
+      registered = buffers_;
+    }
+
+    struct buffer_snapshot {
+      std::vector<trace_event> events;
+      std::uint32_t tid = 0;
+    };
+    std::vector<buffer_snapshot> snapshots;
+    snapshots.reserve(registered.size());
+    std::uint64_t dropped = 0;
+    for (const auto& buffer : registered) {
+      std::lock_guard buffer_guard(buffer->mutex);
+      dropped += buffer->dropped;
+      snapshots.push_back({buffer->events, buffer->tid});
+    }
+    if (dropped_total != nullptr) {
+      *dropped_total = dropped;
+    }
+
     std::FILE* out = std::fopen(path, "w");
     if (out == nullptr) {
       return false;
     }
-    bool ok = std::fputs("{\"traceEvents\":[", out) >= 0;
-    std::uint64_t dropped = 0;
-    bool first = true;
-
-    std::lock_guard registry_guard(registry_mutex_);
-    for (const auto& buffer : buffers_) {
-      std::lock_guard buffer_guard(buffer->mutex);
-      dropped += buffer->dropped;
-      for (const trace_event& event : buffer->events) {
-        const std::string name = escape(event.name);
-        ok = ok &&
-             std::fprintf(
-                 out,
-                 "%s\n{\"name\":\"%s\",\"cat\":\"scope\",\"ph\":\"X\","
-                 "\"ts\":%.3f,\"dur\":%.3f,\"pid\":1,\"tid\":%u}",
-                 first ? "" : ",", name.c_str(),
-                 static_cast<double>(event.start_ns) / 1e3,
-                 static_cast<double>(event.duration_ns) / 1e3,
-                 buffer->tid) >= 0;
-        first = false;
+    const bool header_ok = std::fputs("{\"traceEvents\":[", out) >= 0;
+    bool ok = header_ok;
+    if (header_ok) {
+      bool first = true;
+      for (const auto& snapshot : snapshots) {
+        for (const trace_event& event : snapshot.events) {
+          const std::string name = escape(event.name);
+          ok = ok &&
+               std::fprintf(
+                   out,
+                   "%s\n{\"name\":\"%s\",\"cat\":\"scope\",\"ph\":\"X\","
+                   "\"ts\":%.3f,\"dur\":%.3f,\"pid\":1,\"tid\":%" PRIu32 "}",
+                   first ? "" : ",", name.c_str(),
+                   static_cast<double>(event.start_ns) / 1e3,
+                   static_cast<double>(event.duration_ns) / 1e3,
+                   snapshot.tid) >= 0;
+          first = false;
+        }
       }
+      // Whenever the header made it out, the footer is written even after
+      // an event-write failure, so the file on disk stays syntactically
+      // complete JSON if the filesystem allows.
+      const bool footer_ok = std::fputs("\n]}\n", out) >= 0;
+      ok = ok && footer_ok;
     }
-    // The footer is written even after an earlier failure, so the file on
-    // disk is syntactically complete JSON whenever the filesystem allows.
-    const bool footer_ok = std::fputs("\n]}\n", out) >= 0;
-    ok = ok && footer_ok;
     ok = (std::fclose(out) == 0) && ok;
-    if (dropped_total != nullptr) {
-      *dropped_total = dropped;
-    }
     return ok;
   }
 
