@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -50,16 +51,22 @@ class collector {
     capacity_.store(capacity, std::memory_order_relaxed);
   }
 
-  // Hot path: records into the calling thread's buffer.
+  // Hot path: records into the calling thread's buffer. Never throws:
+  // trace_scope destructors call this, and an allocation failure counts
+  // as a dropped event rather than terminating the program.
   void record(const char* name, std::uint64_t start_ns,
-              std::uint64_t duration_ns) {
+              std::uint64_t duration_ns) noexcept {
     thread_buffer& mine = local_buffer();
     std::lock_guard guard(mine.mutex);
     if (mine.events.size() >= capacity_.load(std::memory_order_relaxed)) {
       ++mine.dropped;
       return;
     }
-    mine.events.push_back({name, start_ns, duration_ns});
+    try {
+      mine.events.push_back({name, start_ns, duration_ns});
+    } catch (const std::bad_alloc&) {
+      ++mine.dropped;
+    }
   }
 
   // Writes every buffer as chrome trace-event JSON. Returns false when the
@@ -92,7 +99,10 @@ class collector {
         first = false;
       }
     }
-    ok = ok && std::fputs("\n]}\n", out) >= 0;
+    // The footer is written even after an earlier failure, so the file on
+    // disk is syntactically complete JSON whenever the filesystem allows.
+    const bool footer_ok = std::fputs("\n]}\n", out) >= 0;
+    ok = ok && footer_ok;
     ok = (std::fclose(out) == 0) && ok;
     if (dropped_total != nullptr) {
       *dropped_total = dropped;
@@ -100,15 +110,24 @@ class collector {
     return ok;
   }
 
-  // Empties every buffer and drop counter; buffers stay registered.
-  // Call only while no thread is recording.
+  // Empties every buffer and drop counter, and prunes buffers whose
+  // threads have exited. Live buffers stay registered. Call only while no
+  // thread is recording. Buffers of exited threads are retained until this
+  // runs so their events still reach the trace; long-running programs with
+  // thread churn should clear() after each flush.
   void clear() {
     std::lock_guard registry_guard(registry_mutex_);
+    std::vector<std::shared_ptr<thread_buffer>> kept;
+    kept.reserve(buffers_.size());
     for (const auto& buffer : buffers_) {
       std::lock_guard buffer_guard(buffer->mutex);
       buffer->events.clear();
       buffer->dropped = 0;
+      if (buffer->alive) {
+        kept.push_back(buffer);
+      }
     }
+    buffers_.swap(kept);
   }
 
  private:
@@ -117,21 +136,34 @@ class collector {
     std::vector<trace_event> events;
     std::uint64_t dropped = 0;
     std::uint32_t tid = 0;
+    bool alive = true;  // Guarded by mutex; false once the thread exits.
+  };
+
+  // Marks the buffer dead when its thread exits, so clear() can prune it.
+  struct buffer_handle {
+    std::shared_ptr<thread_buffer> buffer;
+    ~buffer_handle() {
+      if (buffer != nullptr) {
+        std::lock_guard guard(buffer->mutex);
+        buffer->alive = false;
+      }
+    }
   };
 
   collector() = default;
 
   // Registered once per thread; the registry keeps the buffer alive after
-  // the thread exits so its events still reach the trace.
+  // the thread exits so its events still reach the trace. Tids come from a
+  // monotonic counter, so pruning never recycles them.
   thread_buffer& local_buffer() {
-    thread_local std::shared_ptr<thread_buffer> mine = [this] {
+    thread_local buffer_handle handle = [this] {
       auto buffer = std::make_shared<thread_buffer>();
       std::lock_guard guard(registry_mutex_);
-      buffer->tid = static_cast<std::uint32_t>(buffers_.size() + 1);
+      buffer->tid = next_tid_++;
       buffers_.push_back(buffer);
-      return buffer;
+      return buffer_handle{buffer};
     }();
-    return *mine;
+    return *handle.buffer;
   }
 
   static std::string escape(const char* raw) {
@@ -154,6 +186,7 @@ class collector {
 
   std::mutex registry_mutex_;
   std::vector<std::shared_ptr<thread_buffer>> buffers_;
+  std::uint32_t next_tid_ = 1;  // Guarded by registry_mutex_.
   std::atomic<std::size_t> capacity_{std::size_t{1} << 20};
 };
 

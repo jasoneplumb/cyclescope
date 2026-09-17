@@ -127,6 +127,23 @@ TEST_CASE("threads keep distinct tids and survive exit") {
         kThreads * kEventsPerThread);
 }
 
+TEST_CASE("clear prunes exited threads and tids stay unique") {
+  reset_collector();
+  std::thread first([] { CYCLESCOPE_SCOPE("gen1"); });
+  first.join();
+  cyclescope::collector::instance().clear();  // Prunes gen1's dead buffer.
+
+  std::thread second([] { CYCLESCOPE_SCOPE("gen2"); });
+  second.join();
+
+  const std::string path = temp_trace_path("churn");
+  REQUIRE(cyclescope::collector::instance().write_json(path.c_str()));
+  const std::string json = slurp(path);
+  std::remove(path.c_str());
+  CHECK(count_occurrences(json, "\"name\":\"gen1\"") == 0);
+  CHECK(count_occurrences(json, "\"name\":\"gen2\"") == 1);
+}
+
 TEST_CASE("recording races a concurrent flush safely") {
   reset_collector();
   std::atomic<bool> stop{false};
