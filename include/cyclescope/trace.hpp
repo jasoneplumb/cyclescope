@@ -26,6 +26,13 @@
 
 namespace cyclescope {
 
+namespace detail {
+// Trivially destructible, so reading it stays defined even after this
+// thread's nontrivial thread_locals (including the buffer handle) are
+// gone. Set during TLS teardown; record() then drops late events.
+inline thread_local bool tls_shutdown = false;
+}  // namespace detail
+
 struct trace_event {
   const char* name;
   std::uint64_t start_ns;
@@ -57,6 +64,11 @@ class collector {
   // as a dropped event rather than terminating the program.
   void record(const char* name, std::uint64_t start_ns,
               std::uint64_t duration_ns) noexcept {
+    if (detail::tls_shutdown) {
+      // A traced destructor ran after this thread's buffer handle was
+      // destroyed; the event is dropped rather than touching dead TLS.
+      return;
+    }
     thread_buffer& mine = local_buffer();
     std::lock_guard guard(mine.mutex);
     if (mine.events.size() >= capacity_.load(std::memory_order_relaxed)) {
@@ -71,8 +83,9 @@ class collector {
   }
 
   // Writes every buffer as chrome trace-event JSON. Returns false when the
-  // file cannot be opened or written. `dropped_total`, when non-null,
-  // receives the number of events lost to capacity limits.
+  // file cannot be opened or written. `dropped_total`, when non-null, is
+  // always written with the number of events lost to capacity limits,
+  // including when the function returns false.
   //
   // No lock is held across file I/O: the registry and each buffer are
   // snapshotted first (a transient copy of the event data), so recording
@@ -86,7 +99,7 @@ class collector {
 
     struct buffer_snapshot {
       std::vector<trace_event> events;
-      std::uint32_t tid = 0;
+      std::uint64_t tid = 0;
     };
     std::vector<buffer_snapshot> snapshots;
     snapshots.reserve(registered.size());
@@ -115,7 +128,7 @@ class collector {
                std::fprintf(
                    out,
                    "%s\n{\"name\":\"%s\",\"cat\":\"scope\",\"ph\":\"X\","
-                   "\"ts\":%.3f,\"dur\":%.3f,\"pid\":1,\"tid\":%" PRIu32 "}",
+                   "\"ts\":%.3f,\"dur\":%.3f,\"pid\":1,\"tid\":%" PRIu64 "}",
                    first ? "" : ",", name.c_str(),
                    static_cast<double>(event.start_ns) / 1e3,
                    static_cast<double>(event.duration_ns) / 1e3,
@@ -158,14 +171,16 @@ class collector {
     std::mutex mutex;
     std::vector<trace_event> events;
     std::uint64_t dropped = 0;
-    std::uint32_t tid = 0;
+    std::uint64_t tid = 0;
     bool alive = true;  // Guarded by mutex; false once the thread exits.
   };
 
-  // Marks the buffer dead when its thread exits, so clear() can prune it.
+  // Marks the buffer dead when its thread exits, so clear() can prune it,
+  // and flags TLS teardown so later record() calls bail out safely.
   struct buffer_handle {
     std::shared_ptr<thread_buffer> buffer;
     ~buffer_handle() {
+      detail::tls_shutdown = true;
       if (buffer != nullptr) {
         std::lock_guard guard(buffer->mutex);
         buffer->alive = false;
@@ -209,7 +224,7 @@ class collector {
 
   std::mutex registry_mutex_;
   std::vector<std::shared_ptr<thread_buffer>> buffers_;
-  std::uint32_t next_tid_ = 1;  // Guarded by registry_mutex_.
+  std::uint64_t next_tid_ = 1;  // Guarded by registry_mutex_; never wraps.
   std::atomic<std::size_t> capacity_{std::size_t{1} << 20};
 };
 
