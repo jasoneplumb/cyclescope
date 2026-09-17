@@ -99,11 +99,12 @@ the instrumented computation diverges.
 | path                        | cost per event | workload                          |
 | --------------------------- | -------------: | --------------------------------- |
 | scope macro (`CYCLESCOPE_SCOPE`) | 136 ns    | 1,000,000 scopes vs empty loop    |
-| compiler instrumentation    |          86 ns | fib(26), 635,621 calls vs plain   |
+| compiler instrumentation    |         136 ns | fib(26), 392,835 calls vs plain   |
 
-Both paths land in the same order of magnitude: roughly a hundred
-nanoseconds per event, dominated by the timestamp read, the uncontended
-buffer mutex, and (for instrumentation) the interned-name lookup. That
+The two paths cost the same per event, which is expected: both are
+dominated by the shared record path (the timestamp read and the
+uncontended buffer mutex), with the instrumentation backend adding only an
+interned-name hash lookup on top. That
 budget suits functions of microseconds and up; instrumenting a
 few-nanosecond leaf function multiplies its cost by an order of magnitude,
 which is visible in the fib workload itself (traced runtime grows from

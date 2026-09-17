@@ -29,7 +29,7 @@ __attribute__((noinline)) long fib_plain(int n) {
 long fib_call_count(int n) {
   long a = 0;
   long b = 1;
-  for (int i = 0; i < n + 1; ++i) {
+  for (int i = 0; i < n; ++i) {
     const long next = a + b;
     a = b;
     b = next;
