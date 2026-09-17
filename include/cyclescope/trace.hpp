@@ -31,6 +31,19 @@ namespace detail {
 // thread's nontrivial thread_locals (including the buffer handle) are
 // gone. Set during TLS teardown; record() then drops late events.
 inline thread_local bool tls_shutdown = false;
+
+// True while collector internals run on this thread. Instrumentation
+// hooks check it and stand down, so a hook firing inside record() or
+// write_json() can never re-enter a lock this thread already holds.
+inline thread_local bool tls_suppress = false;
+
+struct suppress_scope {
+  bool previous;
+  suppress_scope() noexcept : previous(tls_suppress) { tls_suppress = true; }
+  suppress_scope(const suppress_scope&) = delete;
+  suppress_scope& operator=(const suppress_scope&) = delete;
+  ~suppress_scope() { tls_suppress = previous; }
+};
 }  // namespace detail
 
 struct trace_event {
@@ -50,9 +63,13 @@ inline std::uint64_t trace_now_ns() {
 
 class collector {
  public:
+  // Deliberately immortal (never destroyed): instrumentation hooks and
+  // traced destructors can run during process teardown, and a destroyed
+  // collector would turn those into use-after-free. The buffers are
+  // reclaimed by the operating system at process exit.
   static collector& instance() {
-    static collector self;
-    return self;
+    static collector* self = new collector();
+    return *self;
   }
 
   void set_capacity_per_thread(std::size_t capacity) {
@@ -69,6 +86,7 @@ class collector {
       // destroyed; the event is dropped rather than touching dead TLS.
       return;
     }
+    detail::suppress_scope suppress;
     thread_buffer& mine = local_buffer();
     std::lock_guard guard(mine.mutex);
     if (mine.events.size() >= capacity_.load(std::memory_order_relaxed)) {
@@ -91,6 +109,7 @@ class collector {
   // snapshotted first (a transient copy of the event data), so recording
   // threads and thread registration never stall behind a slow disk.
   bool write_json(const char* path, std::uint64_t* dropped_total = nullptr) {
+    detail::suppress_scope suppress;
     std::vector<std::shared_ptr<thread_buffer>> registered;
     {
       std::lock_guard registry_guard(registry_mutex_);
@@ -152,6 +171,7 @@ class collector {
   // runs so their events still reach the trace; long-running programs with
   // thread churn should clear() after each flush.
   void clear() {
+    detail::suppress_scope suppress;
     std::lock_guard registry_guard(registry_mutex_);
     std::vector<std::shared_ptr<thread_buffer>> kept;
     kept.reserve(buffers_.size());
